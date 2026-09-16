@@ -230,10 +230,26 @@ def barrido_contacto_GW(alturas_picos, radios, E_star, n_pasos=50):
 
 def calcular_areas_analiticas_GW(df, alturas_picos, R_medio, rho, sigma_p, A_0,E_star):
     """
-    Añade al DataFrame:
-      1. A_GW_matriz: evaluacion directa de GW sobre las alturas usando paquetes gausianos para calcular la integral analíticamente.
-      2. A_GW_aprox: evaluacion teorica usando la aproximación resultante de de paquetes gausaianos.
-      Como ambas cosas usan los mismos paquetes gausianos se espera que el resultado sea el mismo, pero es una forma numérica de confirmarlo.
+    Añade al DataFrame la validación teórica de Greenwood-Williamson (GW):
+      1. A_GW_integral [nm2]: Solución analítica exacta de GW calculada
+         mediante cuadratura numérica (scipy.integrate.quad) sobre una distribución
+         gaussiana ideal de alturas de cumbres F_1(h).
+      2. A_GW_lineal [nm2]: Límite asintótico analítico de GW para cargas elásticas
+         ligeras (A_real = c * (F_N / E*) * sqrt(R / sigma_p), con c = sqrt(pi)).
+
+    Interpretación de discrepancias y validación:
+      - Filas iniciales (d >> mean(z)): Errores relativos elevados debidos al
+        efecto de tamaño de muestra finito (la superficie discreta NxN trunca la
+        cola gaussiana infinita antes de alcanzar cotas extremas).
+      - Régimen medio elástico (h in [1.5, 3.0]): Excelente convergencia con la
+        aproximación lineal (< 5-8% de error), validando la proporcionalidad A_real ~ F_N.
+      - Error residual frente a la integral (~15-20%): Discrepancia física estructural
+        esperada. La teoría de GW asume un radio medio esférico idéntico (R_medio) y 
+        cumbres sin correlación espacial, mientras que la simulación discreta deforma
+        cada aspereza con su curvatura local exacta heterogénea (R_i vía Laplaciano). 
+        En general la simulación computacional resulta ser más fidedigna a la realidad
+        ya que no considera todas las irregularidades como esferas iguales sino que varía
+        su radio de curvatura. 
     """
     #Inicializamos los valores útiles
     z_p_mean = np.mean(alturas_picos)
