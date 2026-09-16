@@ -3,6 +3,9 @@ from scipy.signal import fftconvolve
 from scipy.spatial import ConvexHull
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+from scipy.ndimage import maximum_filter
+from scipy.integrate import quad
+import pandas as pd
 
 # ==============================================================================
 # 1. PARÁMETROS FÍSICOS Y NUMÉRICOS DEL SISTEMA
@@ -150,6 +153,77 @@ def asentar_y_extraer_mallas(granos, Z_metal, N, dx):
         Z_bot[i_min:i_max, j_min:j_max][dentro] = np.fmin(Z_bot[i_min:i_max, j_min:j_max][dentro], z_b)
 
     return Z_top, Z_bot, poliedros_3d
+
+
+
+#Para poder verificar AGW es necesario permitir que las dos placas de metal tengan un contacto elástico, con defomraciones. 
+#Por simplificación analítica, vamos a ir desplazando el material distancias arbitrarias, que corresponderán a una fuerza, y a un área, luego podremos mirar en las tablas obtenidas para x fuerza, cuanta distancia se desplaza y que area hay. 
+#Cabe destacar que en esta parte, en vez de trabajar coin Z1 y Z2 lo hacemos con Z_eq, ya que es lo mismo mirar asperezas con ambas matrices, que con la suma equivalente y una pared plana, lo que computacionalmente es mucho más sencillo  (g(x, y) = z_sup(x, y) - z_inf}(x, y) = (d - Z_2(x, y)) - Z_1(x, y))= d- Z_eq
+def caracterizar_asperezas(Z,dx):
+    """
+    Usamos análisis de los vecinos proximos para saber la posición de los maximos locales, que serán las asperezas a considerar para la mecánica de contacto. Con eso calculamos su radio de curbatura local 
+    """
+    #Filtramos los maximos locales 
+    filtro=maximum_filter(Z,size=3)#Filtramos en un 3x3 de vecinos proximos (Modelo similar a ISING)
+    es_pico=(Z==filtro)
+    #Excluimos los bordes que no son picos reales
+    es_pico[0, :] = es_pico[-1, :] = es_pico[:, 0] = es_pico[:, -1] = False
+
+    alturas_picos=Z[es_pico] #Guradamos la alutra de los maximos
+    num_picos=len(alturas_picos)#Guardamos el numero de picos
+    area_total = (Z.shape[0] * dx) * (Z.shape[1] * dx)
+    rho = num_picos / area_total  # Densidad de picos por m^2
+
+    #Analizamos la curbatura por pico
+    i_picos, j_picos = np.where(es_pico)
+    d2z_dx2 = (Z[i_picos, j_picos + 1] - 2 * Z[i_picos, j_picos] + Z[i_picos, j_picos - 1]) / (dx**2)
+    d2z_dy2 = (Z[i_picos + 1, j_picos] - 2 * Z[i_picos, j_picos] + Z[i_picos - 1, j_picos]) / (dx**2)
+    # La curvatura media kappa es -0.5 * laplaciano; el radio es 1 / kappa
+    kappa = -0.5 * (d2z_dx2 + d2z_dy2)
+    validos = (kappa > 1e-6)#aseguramos que hay curvatura descartando cuando no la haya
+    radios = 1/kappa[validos] 
+    alturas_picos=alturas_picos[validos]
+    R_medio= np.mean(radios)
+    sigma_p = np.std(alturas_picos)
+    
+    return alturas_picos,radios, R_medio, rho ,sigma_p
+
+def barrido_contacto_GW(alturas_picos, radios, E_star, n_pasos=50):
+    """
+    Calcula la curva de area A_real vs F_N bajando una placa rígida paso a paso. 
+    """ 
+    #Miramos los puntos maximo y minimos 
+    z_max = np.max(alturas_picos)
+    z_min = np.min(alturas_picos)
+    # Barrido de separación 'd' desde el pico más alto hacia abajo
+    separaciones = np.linspace(z_max, z_min + 0.3 * (z_max - z_min), n_pasos) #El 0.3 es la cota de bajada maxima que pude hacer el material, se debe aproximadamente a hacer una resticción de d \approx 2sigma_s o 1.5\sigma_s. (Son valores empiricos de maximo desplazamiento)
+    
+    #Inicializamos las listas de valores 
+    A_real = []
+    F_normal = []
+
+    for d in separaciones: 
+        #Miramos para un movimiento concreto que particulas están en contacto 
+        delta =alturas_picos -d
+        en_contacto = delta >0 
+        #Para cada altura miramos si hay contacto, si lo hay guardamos la infomación de la fuerza y de las areas de contacto.  
+        if np.any(en_contacto):
+            delta_c = delta[en_contacto]
+            R_c = radios[en_contacto]
+            
+            # Formulación elástica de Hertz (GW) por cada aspereza
+            areas = np.pi * R_c * delta_c #Usamos la fomulación de Hertz para hacer los cálculos
+            fuerzas = (4.0 / 3.0) * E_star * np.sqrt(R_c) * (delta_c**1.5) #De igual forma usamos la solución a la fuerza de Hertz para relacionar la presión con la fuerza a través de una integración.
+            
+            A_real.append(np.sum(areas))
+            F_normal.append(np.sum(fuerzas))
+        else:
+            A_real.append(0.0)
+            F_normal.append(0.0)
+
+
+    return np.array(F_normal), np.array(A_real) , separaciones
+
 
 
 """
@@ -308,3 +382,51 @@ ax.view_init(elev=22, azim=-55)
 plt.tight_layout()
 plt.savefig("regolito_poliedrico_cerrado.png", dpi=300)
 plt.show()
+
+
+#Comprobación de AGW 
+# Propiedades mecánicas (ej. Aluminio-Aluminio: E=70 GPa, nu=0.33)
+E_mat = 70e9
+nu_mat = 0.33
+E_star = 1.0 / (2.0 * (1.0 - nu_mat**2) / E_mat)
+
+# 1. Superficie compuesta equivalente
+Z1 = generar_superficie(N_PUNTOS, DX, SIGMA_S, XI)
+Z2 = generar_superficie(N_PUNTOS, DX, SIGMA_S, XI)
+Z_eq = Z1 + Z2
+
+# 2. Extracción numérica discreta
+alturas, radios, R_medio, rho, sigma_p = caracterizar_asperezas(Z_eq, DX)
+F_num, A_num, separaciones = barrido_contacto_GW(alturas, radios, E_star, n_pasos=60)
+
+# 3. Solución teórica analítica continua de Greenwood-Williamson (1966)
+A0 = (N_PUNTOS * DX)**2
+A_teorico_GW = []
+F_teorico_GW = []
+
+phi = lambda s: (1.0 / np.sqrt(2.0 * np.pi)) * np.exp(-0.5 * s**2)
+
+#Printeamos los resultados con pandas en un DataFrame para luego poder añadir siempre más información como columnas con las areas analiticas y aproximadas
+area_aparente_nm2 = (N_PUNTOS * DX * 1e9)**2
+
+# Construcción del DataFrame con magnitudes físicas escaladas
+df_contacto = pd.DataFrame({
+    'd [nm]': separaciones * 1e9,
+    'F_normal [uN]': F_num * 1e6,
+    'A_real [nm2]': A_num * 1e18,
+    'A_real / A_0 [%]': (A_num * 1e18 / area_aparente_nm2) * 100.0,
+    'P_media [MPa]': np.where(A_num > 0, (F_num / A_num) * 1e-6, 0.0)
+})
+
+# Configuración de pandas para ver la tabla completa sin recortes en consola
+pd.set_option('display.max_rows', None)
+pd.set_option('display.max_columns', None)
+pd.set_option('display.width', 1000)
+pd.set_option('display.float_format', lambda x: f'{x:12.4e}' if abs(x) < 1e-2 and x != 0 else f'{x:12.3f}')
+
+print("\n" + "=" * 80)
+print("RESULTADOS NUMÉRICOS DISCRETOS: BARRIDO DE CONTACTO")
+print(f"Área aparente nominal A_0: {area_aparente_nm2:.2f} nm²")
+print("=" * 80)
+print(df_contacto)
+print("=" * 80)
