@@ -6,11 +6,12 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from scipy.ndimage import maximum_filter
 from scipy.integrate import quad
 import pandas as pd
+from scipy.integrate import quad
 
 # ==============================================================================
 # 1. PARÁMETROS FÍSICOS Y NUMÉRICOS DEL SISTEMA
 # ==============================================================================
-N_PUNTOS = 512          # Resolución de la malla (512x512)
+N_PUNTOS = 1024          # Resolución de la malla (512x512)
 DX = 1e-9               # Resolución espacial: 1 nm por píxel
 SIGMA_S = 1.5e-9        # Rugosidad RMS de la superficie metálica: 1.5 nm
 XI = 10e-9              # Longitud de correlación espacial: 10 nm
@@ -225,7 +226,59 @@ def barrido_contacto_GW(alturas_picos, radios, E_star, n_pasos=50):
     return np.array(F_normal), np.array(A_real) , separaciones
 
 
+#Elaboramos una función que calcule las areas reales analíticas a través de la formulación de GW, así podremos comparar los datos computacionales con los analíticos. 
 
+def calcular_areas_analiticas_GW(df, alturas_picos, R_medio, rho, sigma_p, A_0,E_star):
+    """
+    Añade al DataFrame:
+      1. A_GW_matriz: evaluacion directa de GW sobre las alturas usando paquetes gausianos para calcular la integral analíticamente.
+      2. A_GW_aprox: evaluacion teorica usando la aproximación resultante de de paquetes gausaianos.
+      Como ambas cosas usan los mismos paquetes gausianos se espera que el resultado sea el mismo, pero es una forma numérica de confirmarlo.
+    """
+    #Inicializamos los valores útiles
+    z_p_mean = np.mean(alturas_picos)
+    phi = lambda s: (1.0 / np.sqrt(2.0 * np.pi)) * np.exp(-0.5 * s**2)
+    
+    A_integral_m2 = []
+    F_integral_N = []
+    #Vía integración directa: (usamos un for ya que lo hacemos uno a uno) 
+    separaciones = df['d [nm]'].values * 1e-9  # m
+    for d in separaciones: 
+        h = (d - z_p_mean) / sigma_p
+        if h < 4.0: #Quitamos los valores muy extremos, más allá de 4 sigma porque computacinalmetne son pesados de calcular
+            I_area, _ = quad(lambda s: (s - h) * phi(s), h, 6.0) #Calculamos la integral con quad, usamos un límite de 6 ya que la gausiana a decaido suficiente al ser negativa, y no es necesario ir más allá, pero es el valor sustituitivo de infinito
+            a_int = np.pi * rho * A_0 * R_medio * sigma_p * I_area #Se multplica por las constantes para tener el área total
+            I_fuerza, _ = quad(lambda s: ((s - h)**1.5) * phi(s), h, 6.0) #Calculamos la integral de la fuerza teórica continua 
+            f_int = (4.0 / 3.0) * rho * A_0 * E_star * np.sqrt(R_medio) * (sigma_p**1.5) * I_fuerza
+            F_integral_N.append(f_int)
+        else:
+            a_int = 0.0 # Cuando la cola está muy lejos se indica que es cero
+            F_integral_N.append(0.0)
+        A_integral_m2.append(a_int)
+
+
+    #Aproximación lineal usando E* 
+    F_integral_N = np.array(F_integral_N)
+    # Constante de contacto elastico de GW: sqrt(pi)
+    cte_gw = np.sqrt(np.pi)
+    A_lineal_m2 = cte_gw * (F_integral_N/ E_star) * np.sqrt(R_medio / sigma_p) # Formula aproximada de hacer la integración gausiana
+    
+    # Convertimos ambas a nm² y las añadimos al DataFrame
+    df['A_GW_integral [nm2]'] = np.array(A_integral_m2) * 1e18
+    df['A_GW_lineal [nm2]'] = np.array(A_lineal_m2) * 1e18
+    
+    # Errores porcentuales respecto al resultado numérico discreto
+    df['Error Integral [%]'] = np.where(
+        df['A_real [nm2]'] > 1e-3,
+        np.abs(df['A_real [nm2]'] - df['A_GW_integral [nm2]']) / df['A_real [nm2]'] * 100.0,
+        0.0
+    )
+    df['Error Lineal [%]'] = np.where(
+        df['A_real [nm2]'] > 1e-3,
+        np.abs(df['A_real [nm2]'] - df['A_GW_lineal [nm2]']) / df['A_real [nm2]'] * 100.0,
+        0.0
+    )
+    return df
 """
 #Print temporal hecho para ir comprobando totalmetne desactualizado y con el único proposito de dejarlo para reciclar, si nos viene bien, alguna represntación. Evidentemente se quitará para el final.
 # Convertir a unidades legibles (nanómetros)
@@ -430,3 +483,12 @@ print(f"Área aparente nominal A_0: {area_aparente_nm2:.2f} nm²")
 print("=" * 80)
 print(df_contacto)
 print("=" * 80)
+
+A_0 = (N_PUNTOS * DX)**2
+
+# Actualizamos el DataFrame existente
+df_contacto = calcular_areas_analiticas_GW(df=df_contacto,alturas_picos=alturas,R_medio=R_medio,rho=rho,sigma_p=sigma_p,A_0=A_0,E_star=E_star)
+
+# Visualización comparativa
+cols = ['d [nm]', 'F_normal [uN]', 'A_real [nm2]', 'A_GW_integral [nm2]', 'A_GW_lineal [nm2]','Error Integral [%]', 'Error Lineal [%]']
+print(df_contacto[cols].to_string())
